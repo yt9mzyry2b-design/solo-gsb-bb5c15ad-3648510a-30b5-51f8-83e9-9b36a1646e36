@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { useApp } from '../lib/context';
 import type { ExportBundle } from '../../shared/model';
-import { sampleDocument } from '../lib/sample';
+import { sampleDocument, sampleUsageRules } from '../lib/sample';
 
 const PASTE_PLACEHOLDER = `示例法（节选）
 
@@ -83,7 +83,7 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
             />
           </label>
           <button className="link-btn" onClick={() => {
-            store.replaceWithSample(sampleDocument());
+            store.replaceWithSample(sampleDocument(), sampleUsageRules());
             onClose();
           }}>
             载入内置示例

@@ -7,6 +7,7 @@ import type {
 import { useApp, ANN_FOCUS_EVENT } from '../lib/context';
 import { useHighlighter } from '../lib/highlighter';
 import { RefInline } from './RefInline';
+import { scanUsageNode, type UsageHit } from '../lib/usage';
 
 interface PendingSelection {
   start: number;
@@ -74,7 +75,14 @@ export function NodeEditor({
     if (!editing) setDraft(node.text);
   }, [node.text, editing]);
 
-  const annotations = store.getSnapshot().annotations.filter((a) => a.nodeId === node.id);
+  const { annotations, usageRules } = store.getSnapshot();
+  const nodeAnnotations = annotations.filter((a) => a.nodeId === node.id);
+
+  // 规范用语实时扫描（与侧栏结果使用同一套规则与消解逻辑）
+  const usageHits = useMemo(
+    () => scanUsageNode(node, usageRules),
+    [node, usageRules],
+  );
 
   // 问题跳转 / 批注跳转：滚动到节点
   useEffect(() => {
@@ -122,6 +130,8 @@ export function NodeEditor({
     hl.focusAnnotation && hl.focusAnnotation.nodeId === node.id
       ? hl.focusAnnotation
       : null;
+  const focusUsage =
+    hl.focusUsage && hl.focusUsage.nodeId === node.id ? hl.focusUsage : null;
 
   return (
     <div
@@ -176,6 +186,7 @@ export function NodeEditor({
               return;
             }
             if ((e.target as HTMLElement).closest('.ref-chip')) return;
+            if ((e.target as HTMLElement).closest('.usage-mark')) return;
             setEditing(true);
           }}
           title="点击编辑正文；选取片段可添加批注"
@@ -183,7 +194,9 @@ export function NodeEditor({
           <HighlightedText
             text={node.text}
             occurrences={occurrences}
-            annotations={annotations}
+            annotations={nodeAnnotations}
+            usageHits={usageHits}
+            focusUsageKey={focusUsage?.hitKey ?? null}
             sentence={sentence}
             focusAnnotationId={focusAnn?.annotationId ?? null}
           />
@@ -294,12 +307,16 @@ function HighlightedText({
   text,
   occurrences,
   annotations,
+  usageHits,
+  focusUsageKey,
   sentence,
   focusAnnotationId,
 }: {
   text: string;
   occurrences: RefOccurrence[];
   annotations: Annotation[];
+  usageHits: UsageHit[];
+  focusUsageKey: string | null;
   sentence: { start: number; end: number } | null;
   focusAnnotationId: string | null;
 }) {
@@ -314,7 +331,12 @@ function HighlightedText({
     [annotations, text.length],
   );
 
-  // 引用边界 + 批注边界 + 源句边界切分全文，每个文本段带上其覆盖标记
+  const usageSorted = useMemo(
+    () => [...usageHits].filter((h) => h.end <= text.length).sort((a, b) => a.start - b.start),
+    [usageHits, text.length],
+  );
+
+  // 引用边界 + 批注边界 + 规范命中边界 + 源句边界切分全文，每个文本段带上其覆盖标记
   const points = useMemo(() => {
     const set = new Set<number>([0, text.length]);
     for (const o of sorted) {
@@ -325,17 +347,23 @@ function HighlightedText({
       set.add(a.start);
       set.add(a.end);
     }
+    for (const h of usageSorted) {
+      set.add(h.start);
+      set.add(h.end);
+    }
     if (sentence) {
       set.add(sentence.start);
       set.add(sentence.end);
     }
     return [...set].filter((p) => p >= 0 && p <= text.length).sort((x, y) => x - y);
-  }, [sorted, renderable, sentence, text.length]);
+  }, [sorted, renderable, usageSorted, sentence, text.length]);
 
   if (!text) return <span className="placeholder-text">（空，点击添加正文）</span>;
 
   const refAt = (p: number) =>
     sorted.find((o) => o.span.start <= p && o.span.end > p) ?? null;
+  const usageAt = (p: number) =>
+    usageSorted.find((h) => h.start <= p && h.end > p) ?? null;
 
   const elements: React.ReactNode[] = [];
   const renderedRefs = new Set<string>();
@@ -358,9 +386,24 @@ function HighlightedText({
             highlight={inSentence}
             annotationCovered={covered.length > 0}
             annotationActive={active}
+            usageCovered={usageAt(start) !== null}
           />,
         );
       }
+      continue;
+    }
+    const usage = usageAt(start);
+    if (usage) {
+      const usageActive = focusUsageKey === usage.key;
+      elements.push(
+        <mark
+          key={key}
+          className={`usage-mark ${usageActive ? 'usage-active' : ''}`}
+          title={`规范用语：禁用“${usage.match}”，应为“${usage.preferred}”（在侧栏勾选可批量替换）`}
+        >
+          {text.slice(start, end)}
+        </mark>,
+      );
       continue;
     }
     if (covered.length > 0) {

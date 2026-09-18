@@ -6,6 +6,7 @@ import type {
   DocSnapshot,
   ExportBundle,
   PersistedState,
+  UsageRule,
 } from '../../shared/model';
 import { analyze } from './analyzer';
 import type { Analysis } from '../../shared/model';
@@ -30,19 +31,30 @@ import {
   sanitizeAnnotations,
   ANCHOR_CTX,
 } from './annotations';
+import {
+  applyUsageReplace,
+  createUsageRule,
+  normalizeRule,
+  sanitizeUsageRules,
+  scanUsage,
+  type UsageHit,
+  type UsageReplaceResult,
+} from './usage';
 import { uid } from './uid';
 
-/** 撤销/重做历史承载正文、确认记录与批注；快照独立于历史，不参与撤销 */
+/** 撤销/重做历史承载正文、确认记录、批注与规范用语规则；快照独立于历史，不参与撤销 */
 interface DocState {
   doc: ClauseDocument;
   confirmed: Record<string, string>;
   annotations: Annotation[];
+  usageRules: UsageRule[];
 }
 
 interface Snapshot {
   doc: ClauseDocument;
   confirmed: Record<string, string>;
   annotations: Annotation[];
+  usageRules: UsageRule[];
   snapshots: DocSnapshot[];
   analysis: Analysis;
   canUndo: boolean;
@@ -68,10 +80,17 @@ export class AppStore {
   constructor(initial: PersistedState) {
     this.snapshots = sanitizeSnapshots(initial.snapshots);
     const annotations = sanitizeAnnotations(initial.annotations);
+    // 旧数据缺少 usageRules 时按空规则加载
+    const usageRules = sanitizeUsageRules(initial.usageRules);
     const doc = initial.doc;
     // 加载时按当前正文校正一次位置（导入的 JSON / 旧数据可能已与正文不同步）
     const relocated = relocateAnnotations(annotations, doc).annotations;
-    this.docState = { doc, confirmed: initial.confirmed, annotations: relocated };
+    this.docState = {
+      doc,
+      confirmed: initial.confirmed,
+      annotations: relocated,
+      usageRules,
+    };
     this.analysis = analyze(doc, { confirmed: initial.confirmed });
   }
 
@@ -88,13 +107,14 @@ export class AppStore {
     doc: this.docState.doc,
     confirmed: this.docState.confirmed,
     annotations: this.docState.annotations,
+    usageRules: this.docState.usageRules,
     snapshots: this.snapshots,
     analysis: this.analysis,
     canUndo: this.past.length > 0,
     canRedo: this.future.length > 0,
   });
 
-  /** 当前完整持久化状态（正文 + 确认 + 批注 + 快照） */
+  /** 当前完整持久化状态（正文 + 确认 + 批注 + 规范规则 + 快照） */
   private currentPersisted(): PersistedState {
     return { ...this.docState, snapshots: this.snapshots };
   }
@@ -118,7 +138,7 @@ export class AppStore {
     for (const [sig, target] of Object.entries(next.confirmed)) {
       if (valid.has(sig) && analysis.nodes[target]) confirmed[sig] = target;
     }
-    next = { confirmed, doc: touch(next.doc), annotations };
+    next = { confirmed, doc: touch(next.doc), annotations, usageRules: next.usageRules };
 
     if (options.coalesce) {
       if (this.coalesceBaseline) {
@@ -308,9 +328,14 @@ export class AppStore {
 
   importPastedText(raw: string): void {
     const { doc } = parseDocument(raw, this.docState.doc.title);
-    // 粘贴替换正文是全新文档，旧快照与批注不再有对齐意义
+    // 粘贴替换正文是全新文档，旧快照与批注不再有对齐意义；规范规则保留可继续使用
     this.snapshots = [];
-    this.commit({ doc, confirmed: {}, annotations: [] });
+    this.commit({
+      doc,
+      confirmed: {},
+      annotations: [],
+      usageRules: this.docState.usageRules,
+    });
   }
 
   importJson(bundle: ExportBundle | PersistedState): void {
@@ -326,8 +351,10 @@ export class AppStore {
     this.snapshots = sanitizeSnapshots(bundle.snapshots);
     // 批注随 JSON 导入并按导入后的正文重定位；旧文件缺少 annotations 时为空
     const annotations = sanitizeAnnotations(bundle.annotations);
+    // 规范用语规则随 JSON 导入；旧文件缺少 usageRules 时按空规则加载
+    const usageRules = sanitizeUsageRules(bundle.usageRules);
     renumberAll(doc.root);
-    this.commit({ doc: touch(doc), confirmed, annotations });
+    this.commit({ doc: touch(doc), confirmed, annotations, usageRules });
   }
 
   exportJson(): ExportBundle {
@@ -338,13 +365,15 @@ export class AppStore {
       confirmed: this.docState.confirmed,
       snapshots: this.snapshots,
       annotations: this.docState.annotations,
+      usageRules: this.docState.usageRules,
       exportedAt: new Date().toISOString(),
     };
   }
 
-  replaceWithSample(doc: ClauseDocument): void {
+  /** 载入内置示例：可携带示例规范用语规则 */
+  replaceWithSample(doc: ClauseDocument, usageRules: UsageRule[] = []): void {
     this.snapshots = [];
-    this.commit({ doc, confirmed: {}, annotations: [] });
+    this.commit({ doc, confirmed: {}, annotations: [], usageRules });
   }
 
   // ---------- 版本快照（只读；创建/删除不进入正文撤销历史） ----------
@@ -487,6 +516,91 @@ export class AppStore {
     });
   }
 
+  // ---------- 规范用语审校 ----------
+
+  /** 新增规则，返回规则 id（规范词或变体无效时返回 null） */
+  addUsageRule(preferred: string, variants: string[]): string | null {
+    const rule = normalizeRule(createUsageRule(preferred, variants));
+    if (!rule.preferred || rule.variants.length === 0) return null;
+    this.commit({
+      ...this.docState,
+      usageRules: [...this.docState.usageRules, rule],
+    });
+    return rule.id;
+  }
+
+  /** 编辑规则（规范词 / 变体 / 启用状态）；编辑后规则失去有效变体则拒绝 */
+  updateUsageRule(
+    ruleId: string,
+    patch: { preferred?: string; variants?: string[]; enabled?: boolean },
+  ): void {
+    const current = this.docState.usageRules.find((r) => r.id === ruleId);
+    if (!current) return;
+    const merged = normalizeRule({
+      ...current,
+      ...(patch.preferred !== undefined ? { preferred: patch.preferred } : {}),
+      ...(patch.variants !== undefined ? { variants: patch.variants } : {}),
+      ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+      updatedAt: Date.now(),
+    });
+    if (!merged.preferred || merged.variants.length === 0) return;
+    this.commit({
+      ...this.docState,
+      usageRules: this.docState.usageRules.map((r) => (r.id === ruleId ? merged : r)),
+    });
+  }
+
+  deleteUsageRule(ruleId: string): void {
+    if (!this.docState.usageRules.some((r) => r.id === ruleId)) return;
+    this.commit({
+      ...this.docState,
+      usageRules: this.docState.usageRules.filter((r) => r.id !== ruleId),
+    });
+  }
+
+  /** 调整规则顺序（重叠消解与列表展示顺序） */
+  moveUsageRule(ruleId: string, toIndex: number): void {
+    const from = this.docState.usageRules.findIndex((r) => r.id === ruleId);
+    if (from < 0) return;
+    const next = [...this.docState.usageRules];
+    const [rule] = next.splice(from, 1);
+    const clamped = Math.max(0, Math.min(toIndex, next.length));
+    next.splice(clamped, 0, rule);
+    this.commit({ ...this.docState, usageRules: next });
+  }
+
+  /** 最近一次批量替换结果（供界面提示） */
+  lastUsageReplace: UsageReplaceResult | null = null;
+  /** 批量替换结果的自增序号（即使结果内容相同也触发提示刷新） */
+  lastUsageReplaceNonce = 0;
+
+  /**
+   * 批量替换：对当前正文与规则实时扫描，逐项核对已选命中（节点 ID 与原文区间），
+   * 任一变化则整批拒绝；全部通过后按节点从后向前替换，作为一步提交（支持撤销/重做）。
+   */
+  applyUsageReplace(selectedKeys: string[]): UsageReplaceResult {
+    const scan = scanUsage(this.docState.doc, this.docState.usageRules);
+    const root = cloneTree(this.docState.doc.root);
+    const { root: nextRoot, result } = applyUsageReplace(root, scan.hits, selectedKeys);
+    if (!result.rejected && result.applied === 0) {
+      // 没有可替换项：不生成提示，也不改写正文
+      return result;
+    }
+    this.lastUsageReplace = result;
+    this.lastUsageReplaceNonce += 1;
+    if (result.rejected) {
+      this.emit();
+      return result;
+    }
+    this.commit({ ...this.docState, doc: { ...this.docState.doc, root: nextRoot } });
+    return result;
+  }
+
+  /** 当前扫描快照（侧栏结果列表与正文高亮使用同一规则实时计算） */
+  getUsageHits(): UsageHit[] {
+    return scanUsage(this.docState.doc, this.docState.usageRules).hits;
+  }
+
   // ---------- 派生查询 ----------
 
   targetOfRef(refKey: string): string | null {
@@ -518,6 +632,11 @@ export async function bootstrapStore(): Promise<AppStore> {
   if (local) return new AppStore(local);
   const remote = await serverStore.load();
   if (remote) return new AppStore(remote);
-  const { sampleDocument } = await import('./sample');
-  return new AppStore({ doc: sampleDocument(), confirmed: {}, annotations: [] });
+  const { sampleDocument, sampleUsageRules } = await import('./sample');
+  return new AppStore({
+    doc: sampleDocument(),
+    confirmed: {},
+    annotations: [],
+    usageRules: sampleUsageRules(),
+  });
 }

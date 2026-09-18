@@ -612,6 +612,179 @@ button.small { padding: 1px 6px; font-size: 11px; }
   text-overflow: ellipsis;
 }
 
+/* ---------- 规范用语审校 ---------- */
+.usage-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 正文里的禁用变体标记 */
+.usage-mark {
+  background: rgba(251, 146, 60, 0.18);
+  border-bottom: 2px solid rgba(251, 146, 60, 0.85);
+  border-radius: 3px;
+  padding: 1px 0;
+  color: #fdba74;
+}
+.usage-mark.usage-active {
+  background: rgba(251, 146, 60, 0.45);
+  box-shadow: 0 0 0 2px #fb923c;
+  color: #fff7ed;
+}
+.ref-chip.ref-has-usage {
+  outline: 1px dashed rgba(251, 146, 60, 0.85);
+  outline-offset: 1px;
+}
+
+.usage-rules-section {
+  flex: 0 0 auto;
+  max-height: 42%;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border);
+}
+.usage-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.usage-rule-list {
+  overflow: auto;
+  padding: 0 10px 8px;
+}
+.usage-empty-rules {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 8px 4px;
+  line-height: 1.7;
+}
+.usage-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  padding: 5px 8px;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+}
+.usage-rule-row.is-disabled { opacity: 0.55; }
+.usage-rule-row.has-hits { border-left: 3px solid #fb923c; }
+.usage-rule-new { background: rgba(56,189,248,0.06); border-color: var(--accent); }
+.usage-rule-toggle { display: flex; align-items: center; }
+.usage-rule-view {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.usage-preferred {
+  font-weight: 700;
+  color: #6ee7b7;
+  white-space: nowrap;
+}
+.usage-arrow { color: var(--text-dim); }
+.usage-variants {
+  color: #fdba74;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.usage-rule-hit-badge {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #fff7ed;
+  background: #ea580c;
+  border-radius: 9px;
+  padding: 0 7px;
+}
+.usage-rule-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  visibility: hidden;
+}
+.usage-rule-row:hover .usage-rule-actions,
+.usage-rule-new .usage-rule-actions { visibility: visible; }
+.usage-rule-edit { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.usage-preferred-input,
+.usage-variant-input {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 12px;
+}
+.usage-preferred-input:focus,
+.usage-variant-input:focus { border-color: var(--accent); outline: none; }
+.usage-rule-edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+.usage-hits-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.usage-hits-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.usage-select-all { display: flex; align-items: center; gap: 4px; }
+.usage-hit-count { margin-right: auto; }
+.usage-hit-list { padding-top: 8px; }
+.usage-hit-row { border-left-color: #fb923c; }
+.usage-hit-row.is-checked {
+  background: rgba(251, 146, 60, 0.1);
+  border-color: rgba(251, 146, 60, 0.6);
+}
+.usage-hit-row.is-stale {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.6);
+}
+.usage-hit-head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.usage-hit-check { display: flex; align-items: center; }
+.usage-hit-context { white-space: normal; line-height: 1.7; }
+.usage-hit-mark {
+  background: rgba(251, 146, 60, 0.25);
+  color: #fdba74;
+  border-bottom: 1px solid rgba(251, 146, 60, 0.9);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+.usage-hit-replace { color: #6ee7b7; font-size: 11.5px; margin-left: 2px; }
+.usage-reject-banner {
+  flex: 0 0 auto;
+  margin: 8px 10px 0;
+  padding: 7px 9px;
+  font-size: 12px;
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ---------- 通知条 ---------- */
 .toast {
   position: fixed;

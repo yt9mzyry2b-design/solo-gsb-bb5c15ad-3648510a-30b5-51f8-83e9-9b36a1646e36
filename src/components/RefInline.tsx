@@ -13,11 +13,13 @@ export function RefInline({
   highlight,
   annotationCovered = false,
   annotationActive = false,
+  usageCovered = false,
 }: {
   occurrence: RefOccurrence;
   highlight?: boolean;
   annotationCovered?: boolean;
   annotationActive?: boolean;
+  usageCovered?: boolean;
 }) {
   const { store, highlighter } = useApp();
   const hl = useHighlighter(highlighter);
@@ -62,7 +64,7 @@ export function RefInline({
   return (
     <button
       type="button"
-      className={`ref-chip ${statusClass} ${active ? 'ref-active' : ''} ${highlight ? 'ref-in-sentence' : ''} ${annotationCovered ? 'ref-has-ann' : ''} ${annotationActive ? 'ref-ann-active' : ''}`}
+      className={`ref-chip ${statusClass} ${active ? 'ref-active' : ''} ${highlight ? 'ref-in-sentence' : ''} ${annotationCovered ? 'ref-has-ann' : ''} ${annotationActive ? 'ref-ann-active' : ''} ${usageCovered ? 'ref-has-usage' : ''}`}
       title={title}
       onMouseEnter={() => highlighter.hoverRef(occurrence.key, targetId)}
       onMouseLeave={() => highlighter.hoverRef(null, null)}

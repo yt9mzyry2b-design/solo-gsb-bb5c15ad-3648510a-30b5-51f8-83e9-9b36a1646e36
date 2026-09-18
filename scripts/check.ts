@@ -12,6 +12,15 @@ import {
   sanitizeAnnotations,
   findAll,
 } from '../src/lib/annotations';
+import {
+  applyUsageReplace,
+  createUsageRule,
+  normalizeRule,
+  sanitizeUsageRules,
+  scanUsage,
+  scanUsageText,
+  verifyUsageHits,
+} from '../src/lib/usage';
 import { assert } from 'node:console';
 
 let pass = 0;
@@ -546,6 +555,183 @@ check('同序号歧义', ambA.issues.some((i) => i.type === 'ambiguous'), JSON.s
     { id: 's', name: 's', createdAt: 1, doc: d, confirmed: {}, annotations: [{ nodeId: 'x', quote: 'q', content: 'c' }] },
   ]);
   check('快照导入时规整批注', (loaded[0].annotations?.length ?? 0) === 1);
+}
+
+// ---- 规范用语审校：扫描 ----
+{
+  const rules = [
+    { ...createUsageRule('依照', ['按照', '按着']) },
+    { ...createUsageRule('作出', ['做出']) },
+  ];
+  const hits = scanUsageText('按照规定，按着流程，做出决定，再按照一次。', rules);
+  check('扫描：命中数 4', hits.length === 4, String(hits.length));
+  check('扫描：首个命中为“按照”', hits[0].match === '按照' && hits[0].start === 0, hits[0]?.match);
+  check('扫描：记录规范词', hits[0].preferred === '依照');
+  check('扫描：记录规则序', hits[2].ruleId === rules[1].id && hits[2].ruleIndex === 1, String(hits[2].ruleIndex));
+  check('扫描：重叠不重复输出', hits.every((h, i) => i === 0 || h.start >= hits[i - 1].end));
+}
+
+// ---- 规范用语审校：重叠消解优先级（起点靠前 > 较长 > 规则顺序） ----
+{
+  // 同起点：较长变体优先
+  const r1 = createUsageRule('甲', ['AB']);
+  const r2 = createUsageRule('乙', ['ABC']);
+  let h = scanUsageText('ABC', [r1, r2]);
+  check('重叠：同起点较长优先', h.length === 1 && h[0].match === 'ABC' && h[0].ruleId === r2.id, JSON.stringify(h.map(x=>x.match)));
+
+  // 同起点同长度：规则顺序靠前优先
+  const r3 = createUsageRule('丙', ['XY']);
+  const r4 = createUsageRule('丁', ['XY']);
+  h = scanUsageText('XY', [r3, r4]);
+  check('重叠：同长度规则顺序优先', h.length === 1 && h[0].ruleId === r3.id);
+
+  // 起点靠前优先：先选靠前起点的短串，跨越它的长串被排除
+  const r5 = createUsageRule('长', ['ABC']);
+  const r6 = createUsageRule('短', ['AB']);
+  // 构造：位置 0 有 'AB'，位置 1 有 'BC'？需要起点靠前情形——文本 'ABBC'?
+  // 用文本 'XABC'：r? 起点 1 的 'ABC' 是唯一长串。改为 'ABC' 中 'AB'@0 vs 'ABC'@0 同起点，已覆盖。
+  // 起点不同：'AABC'：'AB'@1（r6 规则在前），'ABC'@1 同起点。再用 'ABCAB'：
+  const text = 'ABCAB';
+  const hh = scanUsageText(text, [r5, r6]); // r5='ABC'@0, r6='AB'@0 与 @3
+  // 同起点取长：ABC@0；之后 AB@3
+  check('重叠：同起点取长后后续不重叠命中保留', hh.length === 2 && hh[0].match === 'ABC' && hh[1].start === 3, JSON.stringify(hh.map(x=>[x.match,x.start])));
+
+  // 起点靠前：规则 rLong='BCD'@1 与 rShort@0='AB'，'AB' 起点 0 应优先，'BCD' 与其重叠被排除
+  const rShort2 = createUsageRule('短', ['AB']);
+  const rLong2 = createUsageRule('长', ['BCD']);
+  const h2 = scanUsageText('ABCD', [rLong2, rShort2]);
+  check('重叠：起点靠前优先于长度', h2.length === 1 && h2[0].match === 'AB' && h2[0].start === 0, JSON.stringify(h2.map(x=>[x.match,x.start])));
+}
+
+// ---- 规范用语审校：停用规则不扫描、规则规整去重 ----
+{
+  const r = createUsageRule('依照', ['按照', '按照', '依照', '', '按着']);
+  check('规整：变体去重、去空、去与规范词相同', r.variants.join('|') === '按照|按着', r.variants.join('|'));
+  const disabled = { ...r, enabled: false };
+  check('停用规则无命中', scanUsageText('按照', [disabled]).length === 0);
+  check('空规范词 / 无变体规则被规整过滤', sanitizeUsageRules([
+    { preferred: '', variants: ['x'] },
+    { preferred: 'a', variants: [] },
+    null, 42,
+  ]).length === 0);
+  check('旧数据缺字段 → 空规则', sanitizeUsageRules(undefined).length === 0);
+  const loaded = sanitizeUsageRules([{ id: 'u1', preferred: '依照', variants: ['按照'] }]);
+  check('合法规则保留并补全时间戳/enabled', loaded.length === 1 && loaded[0].enabled !== false && typeof loaded[0].createdAt === 'number');
+}
+
+// ---- 规范用语审校：全文扫描按文档顺序 ----
+{
+  const d = parseDocument(`用语法
+
+第一条
+按照甲规定。
+
+第二条
+依照乙，按着丙。`).doc;
+  renumberAll(d.root);
+  const rules = [createUsageRule('依照', ['按照', '按着'])];
+  const { hits } = scanUsage(d, rules);
+  check('全文扫描：跨节点 2 处命中', hits.length === 2, String(hits.length));
+  check('全文扫描：先条后款的文档顺序', hits[0].nodeId === d.root[0].children[0].id && hits[1].nodeId === d.root[1].children[0].id);
+  check('全文扫描：key 稳定且唯一', new Set(hits.map((x) => x.key)).size === 2);
+}
+
+// ---- 规范用语审校：提交前核对（节点 ID 与原文区间） ----
+{
+  const d = parseDocument(`核对法
+
+第一条
+按照规定执行。`).doc;
+  renumberAll(d.root);
+  const node = d.root[0].children[0];
+  const rules = [createUsageRule('依照', ['按照'])];
+  const { hits } = scanUsage(d, rules);
+
+  // 未改动：核对通过
+  const ok = verifyUsageHits(d.root, hits, [hits[0].key]);
+  check('核对：原文未变通过', ok.ok && ok.staleKeys.length === 0);
+
+  // 正文变化导致区间文字不同：核对失败
+  const d2 = parseDocument(`核对法
+
+第一条
+新文本按照规定执行。`).doc;
+  renumberAll(d2.root);
+  d2.root[0].id = d.root[0].id;
+  d2.root[0].children[0].id = node.id;
+  const bad = verifyUsageHits(d2.root, hits, [hits[0].key]);
+  check('核对：原文区间变化整批不通过', !bad.ok && bad.staleKeys.length === 1);
+
+  // 节点删除：核对失败
+  const d3 = parseDocument(`核对法
+
+第二条
+无关内容。`).doc;
+  renumberAll(d3.root);
+  const badNode = verifyUsageHits(d3.root, hits, [hits[0].key]);
+  check('核对：节点消失不通过', !badNode.ok);
+}
+
+// ---- 规范用语审校：批量替换（后向前、单步、不递归） ----
+{
+  const d = parseDocument(`替换法
+
+第一条
+按照甲和按照乙。
+
+第二条
+按着流程。`).doc;
+  renumberAll(d.root);
+  const rules = [createUsageRule('依照', ['按照', '按着'])];
+  const { hits } = scanUsage(d, rules);
+  check('替换前：3 处命中', hits.length === 3, String(hits.length));
+
+  const { root, result } = applyUsageReplace(d.root, hits, hits.map((h) => h.key));
+  check('替换：全部应用', result.applied === 3 && !result.rejected, String(result.applied));
+  const t1 = d.root[0].children[0].text;
+  const t2 = d.root[1].children[0].text;
+  check('替换：条内两处均替换', t1 === '依照甲和依照乙。', t1);
+  check('替换：跨节点替换', t2 === '依照流程。', t2);
+  check('替换：不递归处理新文字（规范词不会再触发）', !t1.includes('按照') && !t2.includes('按着'));
+
+  // 部分勾选：只替换已选
+  const d2 = parseDocument(`替换法
+
+第一条
+按照甲和按照乙。`).doc;
+  renumberAll(d2.root);
+  const scan2 = scanUsage(d2, rules);
+  applyUsageReplace(d2.root, scan2.hits, [scan2.hits[1].key]);
+  check('替换：仅处理已选命中', d2.root[0].children[0].text === '按照甲和依照乙。', d2.root[0].children[0].text);
+
+  // 任一项失效整批拒绝，文档不变
+  const d3 = parseDocument(`替换法
+
+第一条
+按照规定。`).doc;
+  renumberAll(d3.root);
+  const stale = scanUsage(d3, rules);
+  const staleNodeId = d3.root[0].children[0].id;
+  const changed = parseDocument(`替换法
+
+第一条
+依照明示。`).doc; // 区间文字已被手工改掉
+  renumberAll(changed.root);
+  changed.root[0].id = d3.root[0].id;
+  changed.root[0].children[0].id = staleNodeId;
+  const r3 = applyUsageReplace(changed.root, stale.hits, [stale.hits[0].key]);
+  check('替换：核对失败整批拒绝且文档不变', r3.result.rejected && changed.root[0].children[0].text === '依照明示。');
+
+  // 不递归：规范词若是另一规则的变体，替换新生成的文字不再被处理（同一批次内）
+  const chainedRules = [createUsageRule('B', ['A']), createUsageRule('C', ['B'])];
+  const d4 = parseDocument(`链法
+
+第一条
+A 文字。`).doc;
+  renumberAll(d4.root);
+  const scan4 = scanUsage(d4, chainedRules);
+  applyUsageReplace(d4.root, scan4.hits, scan4.hits.map((h) => h.key));
+  check('替换：不递归链式改写（A→B 而非直接到 C）', d4.root[0].children[0].text.startsWith('B '), d4.root[0].children[0].text);
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

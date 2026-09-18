@@ -6,13 +6,14 @@ import { Toolbar } from './components/Toolbar';
 import { DocumentTree } from './components/DocumentTree';
 import { IssuePanel } from './components/IssuePanel';
 import { AnnotationPanel } from './components/AnnotationPanel';
+import { UsagePanel } from './components/UsagePanel';
 import { RelationView } from './components/RelationView';
 import { CompareView } from './components/CompareView';
 import { ImportDialog } from './components/ImportDialog';
 import { ToastHost } from './components/Toast';
 
 type ViewMode = 'edit' | 'compare';
-type SideTab = 'issues' | 'annotations' | 'graph';
+type SideTab = 'issues' | 'annotations' | 'usage' | 'graph';
 
 export default function App({
   store,
@@ -62,6 +63,7 @@ export default function App({
   }, []);
 
   const reviewCount = store.getSnapshot().annotations.filter((a) => a.status === 'review').length;
+  const usageHitCount = store.getUsageHits().length;
 
   return (
     <StoreContext.Provider value={{ store, highlighter }}>
@@ -102,6 +104,14 @@ export default function App({
                 </button>
                 <button
                   role="tab"
+                  aria-selected={rightTab === 'usage'}
+                  className={rightTab === 'usage' ? 'active' : ''}
+                  onClick={() => setRightTab('usage')}
+                >
+                  规范用语{usageHitCount > 0 ? `（${usageHitCount}）` : ''}
+                </button>
+                <button
+                  role="tab"
                   aria-selected={rightTab === 'graph'}
                   className={rightTab === 'graph' ? 'active' : ''}
                   onClick={() => setRightTab('graph')}
@@ -116,6 +126,8 @@ export default function App({
                   focusSignal={annFocus}
                   onConsumeFocus={() => setAnnFocus(null)}
                 />
+              ) : rightTab === 'usage' ? (
+                <UsagePanel />
               ) : (
                 <RelationView />
               )}

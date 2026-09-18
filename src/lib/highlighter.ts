@@ -13,6 +13,8 @@ export interface HighlightState {
   focusSentence: { nodeId: string; start: number; end: number } | null;
   /** 批注跳转时高亮的片段区间（按批注在正文中的当前定位） */
   focusAnnotation: { annotationId: string; nodeId: string; start: number; end: number } | null;
+  /** 规范用语命中跳转时高亮的区间 */
+  focusUsage: { hitKey: string; nodeId: string; start: number; end: number } | null;
   /** 用于触发滚动的自增序号 */
   focusNonce: number;
 }
@@ -24,6 +26,7 @@ const initial: HighlightState = {
   activeRefKey: null,
   focusSentence: null,
   focusAnnotation: null,
+  focusUsage: null,
   focusNonce: 0,
 };
 
@@ -67,6 +70,7 @@ export class Highlighter {
       activeNodeId: nodeId,
       focusSentence: sentence ? { nodeId, ...sentence } : null,
       focusAnnotation: null,
+      focusUsage: null,
       activeRefKey: refKey ?? null,
       focusNonce: this.state.focusNonce + 1,
     });
@@ -82,6 +86,19 @@ export class Highlighter {
       activeNodeId: nodeId,
       focusSentence: null,
       focusAnnotation: { annotationId, nodeId, ...range },
+      focusUsage: null,
+      activeRefKey: null,
+      focusNonce: this.state.focusNonce + 1,
+    });
+  }
+
+  /** 规范用语命中跳转：聚焦命中所在节点并高亮命中区间 */
+  jumpToUsage(hitKey: string, nodeId: string, range: { start: number; end: number }): void {
+    this.set({
+      activeNodeId: nodeId,
+      focusSentence: null,
+      focusAnnotation: null,
+      focusUsage: { hitKey, nodeId, ...range },
       activeRefKey: null,
       focusNonce: this.state.focusNonce + 1,
     });

@@ -1,4 +1,4 @@
-import type { ClauseDocument, ClauseNode } from '../../shared/model';
+import type { ClauseDocument, ClauseNode, UsageRule } from '../../shared/model';
 
 let seq = 0;
 function id(p: string): string {
@@ -78,4 +78,19 @@ export function sampleDocument(): ClauseDocument {
     root,
     updatedAt: Date.now(),
   };
+}
+
+/** 示例规范用语规则（示例正文中即包含禁用变体命中） */
+export function sampleUsageRules(): UsageRule[] {
+  const now = Date.now();
+  return [
+    {
+      id: 'usr-sample-1',
+      preferred: '依照',
+      variants: ['按照', '按着'],
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
 }

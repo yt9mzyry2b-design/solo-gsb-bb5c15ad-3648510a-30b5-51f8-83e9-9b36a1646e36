@@ -9,14 +9,41 @@ interface ToastData {
 
 let seq = 0;
 
-/** 监听结构操作后的原子改写结果，弹出提示（文本编辑不提示） */
+/** 监听结构操作后的原子改写结果与规范用语批量替换结果，弹出提示（文本编辑不提示） */
 export function ToastHost() {
   const { store } = useApp();
   const [toasts, setToasts] = useState<ToastData[]>([]);
   const lastInfo = useRef<{ rewritten: number; skipped: number; review: number; doc: unknown } | null>(null);
+  const lastUsage = useRef<{ applied: number; rejected: boolean; stale: number; nonce: number } | null>(null);
+
+  const pushToast = (text: string, kind: ToastData['kind']) => {
+    const id = ++seq;
+    setToasts((t) => [...t.slice(-2), { id, text, kind }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
+  };
 
   useEffect(() => {
     return store.subscribe(() => {
+      // 规范用语批量替换结果（整批拒绝时文档无变化，不会触发结构操作提示）
+      const usage = store.lastUsageReplace;
+      const usageNonce = store.lastUsageReplaceNonce;
+      if (usage && (!lastUsage.current || lastUsage.current.nonce !== usageNonce)) {
+        lastUsage.current = {
+          applied: usage.applied,
+          rejected: usage.rejected,
+          stale: usage.staleKeys.length,
+          nonce: usageNonce,
+        };
+        if (usage.rejected) {
+          pushToast(
+            `规范用语替换被整批拒绝：${usage.staleKeys.length} 项命中的节点或原文已变化，请重新勾选`,
+            'warn',
+          );
+        } else if (usage.applied > 0) {
+          pushToast(`已批量替换 ${usage.applied} 处规范用语（可整体撤销）`, 'info');
+        }
+      }
+
       const snap = store.getSnapshot();
       const info = store.lastRewriteInfo;
       if (!info) return;
@@ -50,9 +77,7 @@ export function ToastHost() {
         parts.length > 0
           ? parts.join('；')
           : `${info.skipped} 处引用无法唯一定位，未自动改写（见右侧问题列表）`;
-      const id = ++seq;
-      setToasts((t) => [...t.slice(-2), { id, text, kind: info.skipped || review ? 'warn' : 'info' }]);
-      setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
+      pushToast(text, info.skipped || review ? 'warn' : 'info');
     });
   }, [store]);
 

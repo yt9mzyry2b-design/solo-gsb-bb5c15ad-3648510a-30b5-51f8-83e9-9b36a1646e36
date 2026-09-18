@@ -192,6 +192,19 @@ export interface DocSnapshot {
   annotations?: Annotation[];
 }
 
+/** 规范用语规则：正文中出现任一禁用变体时提示，可批量替换为规范词 */
+export interface UsageRule {
+  id: string;
+  /** 规范词（替换目标） */
+  preferred: string;
+  /** 禁用变体（按列表顺序扫描；重叠消解时规则顺序靠前的优先） */
+  variants: string[];
+  /** 是否启用；停用的规则不参与扫描，默认 true */
+  enabled?: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /** 持久化状态（同时用于本地文件与浏览器缓存） */
 export interface PersistedState {
   doc: ClauseDocument;
@@ -201,6 +214,8 @@ export interface PersistedState {
   snapshots?: DocSnapshot[];
   /** 审阅批注；旧数据缺少该字段时按空列表加载 */
   annotations?: Annotation[];
+  /** 规范用语规则；旧数据缺少该字段时按空规则加载 */
+  usageRules?: UsageRule[];
 }
 
 export interface ExportBundle {
@@ -212,5 +227,7 @@ export interface ExportBundle {
   snapshots?: DocSnapshot[];
   /** 审阅批注随 JSON 一并导出，导入时恢复并尝试重定位 */
   annotations?: Annotation[];
+  /** 规范用语规则随 JSON 一并导出，导入时恢复 */
+  usageRules?: UsageRule[];
   exportedAt: string;
 }
