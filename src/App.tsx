@@ -1,18 +1,19 @@
 import { useEffect, useState } from 'react';
 import type { AppStore } from './lib/store';
 import type { Highlighter } from './lib/highlighter';
-import { StoreContext, ANN_FOCUS_EVENT } from './lib/context';
+import { StoreContext, ANN_FOCUS_EVENT, TERM_FOCUS_EVENT } from './lib/context';
 import { Toolbar } from './components/Toolbar';
 import { DocumentTree } from './components/DocumentTree';
 import { IssuePanel } from './components/IssuePanel';
 import { AnnotationPanel } from './components/AnnotationPanel';
+import { TermPanel } from './components/TermPanel';
 import { RelationView } from './components/RelationView';
 import { CompareView } from './components/CompareView';
 import { ImportDialog } from './components/ImportDialog';
 import { ToastHost } from './components/Toast';
 
 type ViewMode = 'edit' | 'compare';
-type SideTab = 'issues' | 'annotations' | 'graph';
+type SideTab = 'issues' | 'annotations' | 'terms' | 'graph';
 
 export default function App({
   store,
@@ -25,6 +26,7 @@ export default function App({
   const [rightTab, setRightTab] = useState<SideTab>('issues');
   const [importOpen, setImportOpen] = useState(false);
   const [annFocus, setAnnFocus] = useState<{ id: string; nonce: number } | null>(null);
+  const [termFocus, setTermFocus] = useState<{ key: string; nonce: number } | null>(null);
   const [, force] = useState(0);
   useEffect(() => store.subscribe(() => force((n) => n + 1)), [store]);
 
@@ -61,7 +63,21 @@ export default function App({
     return () => window.removeEventListener(ANN_FOCUS_EVENT, onAnnFocus);
   }, []);
 
+  // 点击正文规范命中标记：切换到规范用语标签并请求侧栏滚动定位
+  useEffect(() => {
+    const onTermFocus = (e: Event) => {
+      const key = (e as CustomEvent<string>).detail;
+      if (key) {
+        setRightTab('terms');
+        setTermFocus((prev) => ({ key, nonce: (prev?.nonce ?? 0) + 1 }));
+      }
+    };
+    window.addEventListener(TERM_FOCUS_EVENT, onTermFocus);
+    return () => window.removeEventListener(TERM_FOCUS_EVENT, onTermFocus);
+  }, []);
+
   const reviewCount = store.getSnapshot().annotations.filter((a) => a.status === 'review').length;
+  const termHitCount = store.getSnapshot().termHits.length;
 
   return (
     <StoreContext.Provider value={{ store, highlighter }}>
@@ -102,6 +118,14 @@ export default function App({
                 </button>
                 <button
                   role="tab"
+                  aria-selected={rightTab === 'terms'}
+                  className={rightTab === 'terms' ? 'active' : ''}
+                  onClick={() => setRightTab('terms')}
+                >
+                  规范用语{termHitCount > 0 ? `（${termHitCount}）` : ''}
+                </button>
+                <button
+                  role="tab"
                   aria-selected={rightTab === 'graph'}
                   className={rightTab === 'graph' ? 'active' : ''}
                   onClick={() => setRightTab('graph')}
@@ -115,6 +139,11 @@ export default function App({
                 <AnnotationPanel
                   focusSignal={annFocus}
                   onConsumeFocus={() => setAnnFocus(null)}
+                />
+              ) : rightTab === 'terms' ? (
+                <TermPanel
+                  focusSignal={termFocus}
+                  onConsumeFocus={() => setTermFocus(null)}
                 />
               ) : (
                 <RelationView />

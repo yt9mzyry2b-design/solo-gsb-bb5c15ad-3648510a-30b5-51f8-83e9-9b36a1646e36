@@ -1,6 +1,7 @@
-import type { Annotation, ClauseDocument, DocSnapshot } from '../../shared/model';
+import type { Annotation, ClauseDocument, DocSnapshot, TermRule } from '../../shared/model';
 import { renumberAll } from './tree';
 import { sanitizeAnnotations } from './annotations';
+import { sanitizeTermRules } from './terminology';
 import { uid } from './uid';
 
 /** 深拷贝可序列化内容（快照与正文完全脱离引用关系） */
@@ -14,6 +15,7 @@ export function createSnapshot(
   confirmed: Record<string, string>,
   name: string,
   annotations: Annotation[] = [],
+  termRules: TermRule[] = [],
   now = Date.now(),
 ): DocSnapshot {
   const snapshot: DocSnapshot = {
@@ -23,6 +25,7 @@ export function createSnapshot(
     doc: deepClone(doc),
     confirmed: deepClone(confirmed),
     annotations: deepClone(annotations),
+    termRules: deepClone(termRules),
   };
   // 快照只读：冻结后任何误写都会立即暴露（开发期），且不影响正文
   return freezeSnapshot(snapshot);
@@ -46,6 +49,13 @@ export function freezeSnapshot(snapshot: DocSnapshot): DocSnapshot {
     snapshot.annotations.forEach((an) => {
       Object.freeze(an);
       if (Array.isArray(an.candidates)) Object.freeze(an.candidates);
+    });
+  }
+  if (Array.isArray(snapshot.termRules)) {
+    Object.freeze(snapshot.termRules);
+    snapshot.termRules.forEach((r) => {
+      Object.freeze(r);
+      Object.freeze(r.variants);
     });
   }
   return snapshot;
@@ -83,6 +93,7 @@ export function sanitizeSnapshots(value: unknown): DocSnapshot[] {
         doc,
         confirmed,
         annotations: sanitizeAnnotations(s.annotations),
+        termRules: sanitizeTermRules(s.termRules),
       }),
     );
   }

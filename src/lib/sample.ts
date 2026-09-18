@@ -1,4 +1,4 @@
-import type { ClauseDocument, ClauseNode } from '../../shared/model';
+import type { ClauseDocument, ClauseNode, TermRule } from '../../shared/model';
 
 let seq = 0;
 function id(p: string): string {
@@ -14,6 +14,17 @@ function par(text: string, children: ClauseNode[] = []): ClauseNode {
 }
 function itm(text: string): ClauseNode {
   return { id: id('itm'), kind: 'item', ordinal: 0, text, children: [] };
+}
+
+/**
+ * 内置示例配套的规范用语规则（id 固定，便于重复载入时去重）。
+ * 示例正文中故意保留了若干禁用变体，方便在「规范用语审校」侧栏看到命中与批量替换。
+ */
+export function sampleTermRules(): TermRule[] {
+  return [
+    { id: 'trm-sample-1', canonical: '依照', variants: ['按照'], createdAt: 0 },
+    { id: 'trm-sample-2', canonical: '应当', variants: ['应该'], createdAt: 0 },
+  ];
 }
 
 /** 内置示例：包含断链、自引用、循环引用、歧义等典型情形 */
@@ -43,7 +54,7 @@ export function sampleDocument(): ClauseDocument {
       par('编号发生调整的，应当同步更新第五条、第六条中的相关引用。'),
     ]),
     art(5, '相对引用', [
-      par('相对引用包括前条、后条、前款、前项等形式。'),
+      par('相对引用包括前条、后条、前款、前项等形式，起草者应该统一使用上述写法。'),
       par('引用后条内容的，应当确认后条已经就同一事项作出规定，参见第七条。'),
       par('本款仅适用于前条所列情形；第（二）项未尽事宜，按照后条第二款处理。', [
         itm('相对引用不得指向不存在的层级，例如第十二条第三款。'),

@@ -30,21 +30,33 @@ import {
   sanitizeAnnotations,
   ANCHOR_CTX,
 } from './annotations';
+import {
+  createTermRule,
+  replaceTermHits,
+  sanitizeTermRules,
+  scanTerms,
+} from './terminology';
+import type { TermHit, TermRule } from '../../shared/model';
+import { sampleTermRules } from './sample';
 import { uid } from './uid';
 
-/** 撤销/重做历史承载正文、确认记录与批注；快照独立于历史，不参与撤销 */
+/** 撤销/重做历史承载正文、确认记录、批注与规范用语规则；快照独立于历史，不参与撤销 */
 interface DocState {
   doc: ClauseDocument;
   confirmed: Record<string, string>;
   annotations: Annotation[];
+  termRules: TermRule[];
 }
 
 interface Snapshot {
   doc: ClauseDocument;
   confirmed: Record<string, string>;
   annotations: Annotation[];
+  termRules: TermRule[];
   snapshots: DocSnapshot[];
   analysis: Analysis;
+  /** 当前规范用语规则对当前正文的实时扫描结果（重叠消解后的命中） */
+  termHits: TermHit[];
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -57,6 +69,8 @@ export class AppStore {
   private docState: DocState;
   private snapshots: DocSnapshot[] = [];
   private analysis: Analysis;
+  /** 当前规范用语命中（随 docState 实时重算，不进入撤销历史） */
+  private termHits: TermHit[] = [];
   /** 当前连续文本编辑突发的起始状态（用于合并撤销） */
   private coalesceBaseline: DocState | null = null;
   private listeners = new Set<() => void>();
@@ -64,15 +78,19 @@ export class AppStore {
   lastRewriteInfo: { rewritten: number; skipped: number } | null = null;
   /** 最近一次结构操作导致新转入待复核的批注数（供通知条提示） */
   lastAnnotationReviewCount = 0;
+  /** 最近一次批量规范替换结果（供界面提示，无操作时为 null） */
+  lastTermReplace: { replaced: number; stale: number } | null = null;
 
   constructor(initial: PersistedState) {
     this.snapshots = sanitizeSnapshots(initial.snapshots);
     const annotations = sanitizeAnnotations(initial.annotations);
+    const termRules = sanitizeTermRules(initial.termRules);
     const doc = initial.doc;
     // 加载时按当前正文校正一次位置（导入的 JSON / 旧数据可能已与正文不同步）
     const relocated = relocateAnnotations(annotations, doc).annotations;
-    this.docState = { doc, confirmed: initial.confirmed, annotations: relocated };
+    this.docState = { doc, confirmed: initial.confirmed, annotations: relocated, termRules };
     this.analysis = analyze(doc, { confirmed: initial.confirmed });
+    this.termHits = scanTerms(doc, termRules);
   }
 
   subscribe = (cb: () => void): (() => void) => {
@@ -88,8 +106,10 @@ export class AppStore {
     doc: this.docState.doc,
     confirmed: this.docState.confirmed,
     annotations: this.docState.annotations,
+    termRules: this.docState.termRules,
     snapshots: this.snapshots,
     analysis: this.analysis,
+    termHits: this.termHits,
     canUndo: this.past.length > 0,
     canRedo: this.future.length > 0,
   });
@@ -99,7 +119,7 @@ export class AppStore {
     return { ...this.docState, snapshots: this.snapshots };
   }
 
-  /** 提交新状态：重新分析、批注自动重定位、裁剪过期确认、压入历史、持久化 */
+  /** 提交新状态：重新分析、批注自动重定位、裁剪过期确认、规范用语重扫、压入历史、持久化 */
   private commit(
     next: DocState,
     options: { coalesce?: boolean; structural?: boolean } = {},
@@ -118,7 +138,9 @@ export class AppStore {
     for (const [sig, target] of Object.entries(next.confirmed)) {
       if (valid.has(sig) && analysis.nodes[target]) confirmed[sig] = target;
     }
-    next = { confirmed, doc: touch(next.doc), annotations };
+    next = { confirmed, doc: touch(next.doc), annotations, termRules: next.termRules };
+    // 规范用语命中随正文 / 规则实时重扫
+    const termHits = scanTerms(next.doc, next.termRules);
 
     if (options.coalesce) {
       if (this.coalesceBaseline) {
@@ -130,12 +152,14 @@ export class AppStore {
     } else {
       this.coalesceBaseline = null;
       this.editCoalesceUntil = 0;
+      this.ruleCoalesceUntil = 0;
       this.past.push(this.docState);
       if (this.past.length > MAX_HISTORY) this.past.shift();
     }
     this.future = [];
     this.docState = next;
     this.analysis = analysis;
+    this.termHits = termHits;
     this.lastAnnotationReviewCount = options.structural ? relocated.reviewIds.length : 0;
     this.scheduleSave();
     this.emit();
@@ -157,9 +181,12 @@ export class AppStore {
     this.future.push(this.docState);
     this.docState = prev;
     this.analysis = analyze(prev.doc, { confirmed: prev.confirmed });
+    this.termHits = scanTerms(prev.doc, prev.termRules);
     this.coalesceBaseline = null;
     this.editCoalesceUntil = 0;
+    this.ruleCoalesceUntil = 0;
     this.lastAnnotationReviewCount = 0;
+    this.lastTermReplace = null;
     this.scheduleSave();
     this.emit();
   }
@@ -170,9 +197,12 @@ export class AppStore {
     this.past.push(this.docState);
     this.docState = next;
     this.analysis = analyze(next.doc, { confirmed: next.confirmed });
+    this.termHits = scanTerms(next.doc, next.termRules);
     this.coalesceBaseline = null;
     this.editCoalesceUntil = 0;
+    this.ruleCoalesceUntil = 0;
     this.lastAnnotationReviewCount = 0;
+    this.lastTermReplace = null;
     this.scheduleSave();
     this.emit();
   }
@@ -180,6 +210,8 @@ export class AppStore {
   // ---------- 文档内容编辑（带 600ms 合并窗口） ----------
 
   private editCoalesceUntil = 0;
+  /** 规范用语规则连续编辑的合并窗口截止时间 */
+  private ruleCoalesceUntil = 0;
 
   updateNodeText(nodeId: string, text: string): void {
     const root = cloneTree(this.docState.doc.root);
@@ -308,9 +340,9 @@ export class AppStore {
 
   importPastedText(raw: string): void {
     const { doc } = parseDocument(raw, this.docState.doc.title);
-    // 粘贴替换正文是全新文档，旧快照与批注不再有对齐意义
+    // 粘贴替换正文是全新文档，旧快照与批注不再有对齐意义；规范用语规则是用户词表，予以保留
     this.snapshots = [];
-    this.commit({ doc, confirmed: {}, annotations: [] });
+    this.commit({ doc, confirmed: {}, annotations: [], termRules: this.docState.termRules });
   }
 
   importJson(bundle: ExportBundle | PersistedState): void {
@@ -326,8 +358,10 @@ export class AppStore {
     this.snapshots = sanitizeSnapshots(bundle.snapshots);
     // 批注随 JSON 导入并按导入后的正文重定位；旧文件缺少 annotations 时为空
     const annotations = sanitizeAnnotations(bundle.annotations);
+    // 规范用语规则随 JSON 导入；旧文件缺少 termRules 时按空规则加载
+    const termRules = sanitizeTermRules(bundle.termRules);
     renumberAll(doc.root);
-    this.commit({ doc: touch(doc), confirmed, annotations });
+    this.commit({ doc: touch(doc), confirmed, annotations, termRules });
   }
 
   exportJson(): ExportBundle {
@@ -338,18 +372,25 @@ export class AppStore {
       confirmed: this.docState.confirmed,
       snapshots: this.snapshots,
       annotations: this.docState.annotations,
+      termRules: this.docState.termRules,
       exportedAt: new Date().toISOString(),
     };
   }
 
   replaceWithSample(doc: ClauseDocument): void {
     this.snapshots = [];
-    this.commit({ doc, confirmed: {}, annotations: [] });
+    // 内置示例自带示例规则（见 sampleTermRules），同时保留用户已维护的词表
+    this.commit({
+      doc,
+      confirmed: {},
+      annotations: [],
+      termRules: [...sampleTermRules(), ...this.docState.termRules],
+    });
   }
 
   // ---------- 版本快照（只读；创建/删除不进入正文撤销历史） ----------
 
-  /** 保存当前文档为命名快照，返回新快照 id；批注随快照一并冻结 */
+  /** 保存当前文档为命名快照，返回新快照 id；批注与规范用语规则随快照一并冻结 */
   saveSnapshot(name: string): string {
     const trimmed = name.trim();
     const snapshot = createSnapshot(
@@ -357,6 +398,7 @@ export class AppStore {
       this.docState.confirmed,
       trimmed || defaultSnapshotName(this.snapshots.length),
       this.docState.annotations,
+      this.docState.termRules,
     );
     this.snapshots = [...this.snapshots, snapshot];
     this.scheduleSave();
@@ -497,6 +539,105 @@ export class AppStore {
   articleOf(nodeId: string): ClauseNode | null {
     return findArticleOf(this.docState.doc.root, nodeId);
   }
+
+  // ---------- 规范用语规则 ----------
+
+  /** 新增一条空规则，返回其 id */
+  addTermRule(): string {
+    const rule = createTermRule();
+    this.commit({ ...this.docState, termRules: [...this.docState.termRules, rule] });
+    return rule.id;
+  }
+
+  /**
+   * 更新规则规范词/变体；连续输入按一个撤销步合并。
+   * trim=true（失焦 / 回车）时规整空白与重复变体；输入过程中保留原文以免打断光标。
+   */
+  updateTermRule(
+    ruleId: string,
+    patch: { canonical?: string; variants?: string[] },
+    trim = false,
+  ): void {
+    const now = Date.now();
+    const coalesce = now < this.ruleCoalesceUntil;
+    this.ruleCoalesceUntil = now + 800;
+    const termRules = this.docState.termRules.map((r) =>
+      r.id === ruleId
+        ? {
+            ...r,
+            ...(patch.canonical !== undefined
+              ? { canonical: trim ? patch.canonical.trim() : patch.canonical }
+              : {}),
+            ...(patch.variants !== undefined
+              ? {
+                  variants: trim
+                    ? patch.variants
+                        .map((v) => v.trim())
+                        .filter((v, i, arr) => v && arr.indexOf(v) === i)
+                    : patch.variants,
+                }
+              : {}),
+          }
+        : r,
+    );
+    this.commit({ ...this.docState, termRules }, { coalesce });
+  }
+
+  deleteTermRule(ruleId: string): void {
+    if (!this.docState.termRules.some((r) => r.id === ruleId)) return;
+    this.commit({
+      ...this.docState,
+      termRules: this.docState.termRules.filter((r) => r.id !== ruleId),
+    });
+  }
+
+  /** 上移 / 下移规则（规则顺序是同长同起点命中的消解优先级） */
+  moveTermRule(ruleId: string, dir: -1 | 1): void {
+    const idx = this.docState.termRules.findIndex((r) => r.id === ruleId);
+    const target = idx + dir;
+    if (idx < 0 || target < 0 || target >= this.docState.termRules.length) return;
+    const termRules = [...this.docState.termRules];
+    [termRules[idx], termRules[target]] = [termRules[target], termRules[idx]];
+    this.commit({ ...this.docState, termRules });
+  }
+
+  /**
+   * 批量替换：仅处理扫描快照中的已勾选命中。
+   * 提交前逐项核对节点 ID 与原文区间；任一项已变化（含已不在当前扫描快照中）
+   * 则整批拒绝（不改正文），全部有效时按节点从后向前单遍替换，
+   * 作为一步支持整体撤销/重做。
+   * 返回实际替换数；被拒绝时返回 0 并记录失效命中数供界面提示。
+   */
+  replaceSelectedTerms(selectedKeys: string[]): { replaced: number; stale: number } {
+    const byKey = new Map(this.termHits.map((h) => [h.key, h]));
+    // 调用方传入的是扫描快照中的 key：当前快照中找不到同样视为“已变化”，计入失效而非静默丢弃
+    const chosen: TermHit[] = [];
+    let stale = 0;
+    const seen = new Set<string>();
+    for (const key of selectedKeys) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const hit = byKey.get(key);
+      if (hit) chosen.push(hit);
+      else stale++;
+    }
+    if (chosen.length === 0 && stale === 0) return { replaced: 0, stale: 0 };
+    if (stale > 0) {
+      this.lastTermReplace = { replaced: 0, stale };
+      this.emit();
+      return { replaced: 0, stale };
+    }
+    const root = cloneTree(this.docState.doc.root);
+    const result = replaceTermHits({ ...this.docState.doc, root }, chosen);
+    this.lastTermReplace = { replaced: result.replaced, stale: result.stale };
+    if (result.stale > 0) {
+      // 整批拒绝：不提交历史，仅触发提示
+      this.emit();
+      return { replaced: 0, stale: result.stale };
+    }
+    this.commit({ ...this.docState, doc: result.doc });
+    return { replaced: result.replaced, stale: 0 };
+  }
 }
 
 function defaultSnapshotName(existing: number): string {
@@ -518,6 +659,11 @@ export async function bootstrapStore(): Promise<AppStore> {
   if (local) return new AppStore(local);
   const remote = await serverStore.load();
   if (remote) return new AppStore(remote);
-  const { sampleDocument } = await import('./sample');
-  return new AppStore({ doc: sampleDocument(), confirmed: {}, annotations: [] });
+  const { sampleDocument, sampleTermRules } = await import('./sample');
+  return new AppStore({
+    doc: sampleDocument(),
+    confirmed: {},
+    annotations: [],
+    termRules: sampleTermRules(),
+  });
 }

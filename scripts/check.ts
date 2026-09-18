@@ -12,6 +12,14 @@ import {
   sanitizeAnnotations,
   findAll,
 } from '../src/lib/annotations';
+import {
+  scanTerms,
+  replaceTermHits,
+  sanitizeTermRules,
+  effectiveVariants,
+  isHitCurrent,
+} from '../src/lib/terminology';
+import { AppStore } from '../src/lib/store';
 import { assert } from 'node:console';
 
 let pass = 0;
@@ -546,6 +554,148 @@ check('同序号歧义', ambA.issues.some((i) => i.type === 'ambiguous'), JSON.s
     { id: 's', name: 's', createdAt: 1, doc: d, confirmed: {}, annotations: [{ nodeId: 'x', quote: 'q', content: 'c' }] },
   ]);
   check('快照导入时规整批注', (loaded[0].annotations?.length ?? 0) === 1);
+}
+
+// ---- 规范用语：规则规整 ----
+{
+  check('旧数据缺 termRules → 空规则', sanitizeTermRules(undefined).length === 0);
+  check('非法规则项被过滤', sanitizeTermRules([null, 42, {}, { canonical: '  ' }]).length === 0);
+  const rules = sanitizeTermRules([
+    { canonical: ' 依照 ', variants: [' 按照 ', '按照', '依照', ''] },
+    { canonical: '应当' },
+  ]);
+  check('合法规则保留并 trim', rules.length === 2 && rules[0].canonical === '依照');
+  check('变体去重且剔除与规范词相同者', rules[0].variants.length === 1 && rules[0].variants[0] === '按照', JSON.stringify(rules[0].variants));
+  check('缺省 id 自动补全', Boolean(rules[1].id));
+  check('effectiveVariants 剔除与规范词相同者', effectiveVariants({ id: 'r', canonical: '甲', variants: ['甲', '乙', '乙'], createdAt: 0 }).join(',') === '乙');
+}
+
+// ---- 规范用语：扫描、重叠消解与批量替换（纯函数） ----
+{
+  const d = parseDocument(`术语法
+
+第一条
+按照规定应该公开，按照程序应该回避。
+
+第二条
+按照后条办理。`).doc;
+  renumberAll(d.root);
+  const n1 = d.root[0].children[0].id;
+  const n2 = d.root[1].children[0].id;
+
+  const rules = sanitizeTermRules([
+    { id: 'r1', canonical: '依照', variants: ['按照'] },
+    { id: 'r2', canonical: '应当', variants: ['应该'] },
+    // 与「按照」同起点的长变体，用于验证长变体优先
+    { id: 'r3', canonical: '依规', variants: ['按照规'] },
+  ]);
+  const hits = scanTerms(d, rules);
+  // 第一条：按照规(长) 应该 按照 应该；第二条：按照
+  check('扫描命中数（长变体优先，且不递归）', hits.length === 5, String(hits.length));
+  const longHit = hits.find((h) => h.variant === '按照规');
+  check('同起点长变体胜出', Boolean(longHit) && longHit!.nodeId === n1, JSON.stringify(hits.map(h => h.variant)));
+  check('长变体胜出后短变体「按照」不在该处命中', !hits.some((h) => h.nodeId === n1 && h.variant === '按照' && h.start === 0));
+  check('命中文档顺序：第一条先于第二条', hits[0].nodeId === n1 && hits[hits.length - 1].nodeId === n2);
+  // 起点靠前消解重叠：长变体 [0,3) 覆盖后，规则 r1 在 0 处的「按照」被跳过
+  check('命中两两互不交叠', hits.every((h, i) => i === 0 || hits[i - 1].nodeId !== h.nodeId || h.start >= hits[i - 1].end));
+
+  // 规则顺序消解：同起点、同长度、不同规则时顺序靠前的优先
+  const dTie = parseDocument(`平手法
+
+第一条
+甲乙同字。`).doc;
+  renumberAll(dTie.root);
+  const tieRules = sanitizeTermRules([
+    { id: 'ta', canonical: 'A', variants: ['甲乙'] },
+    { id: 'tb', canonical: 'B', variants: ['甲乙'] },
+  ]);
+  const tieHits = scanTerms(dTie, tieRules);
+  check('同长同起点：规则顺序靠前者胜出', tieHits.length === 1 && tieHits[0].ruleId === 'ta', JSON.stringify(tieHits));
+
+  // 批量替换：仅替换勾选命中（取除长命中外的其余 4 处），单遍、按节点从后向前
+  const chosen = hits.filter((h) => h.variant !== '按照规');
+  const clone = JSON.parse(JSON.stringify(d)) as typeof d;
+  const r = replaceTermHits(clone, chosen);
+  check('批量替换全部成功', r.replaced === 4 && r.stale === 0, `${r.replaced}/${r.stale}`);
+  const newText1 = clone.root[0].children[0].text;
+  const newText2 = clone.root[1].children[0].text;
+  check('替换结果正确', newText1 === '按照规定应当公开，依照程序应当回避。', newText1);
+  check('长变体未被勾选时原样保留', newText1.startsWith('按照规'));
+  check('第二条替换', newText2 === '依照后条办理。', newText2);
+  // 不递归：替换后出现的规范词即便等于某条规则的变体也不会二次处理（这里变体均不含规范词，另做专项）
+  const dRec = parseDocument(`递归法
+
+第一条
+甲乙。`).doc;
+  renumberAll(dRec.root);
+  // 规则：把「甲」替换成「甲乙」——若递归会再次命中，单遍实现只替换一次
+  const recHits = scanTerms(dRec, sanitizeTermRules([{ id: 'rr', canonical: '甲乙', variants: ['甲'] }]));
+  const recClone = JSON.parse(JSON.stringify(dRec)) as typeof dRec;
+  const recR = replaceTermHits(recClone, recHits);
+  check('替换不递归处理新生成文字', recR.replaced === 1 && recClone.root[0].children[0].text === '甲乙乙。', recClone.root[0].children[0].text);
+
+  // 整批拒绝：任一命中区间已变化（原文不符）则整批不动
+  const staleDoc = JSON.parse(JSON.stringify(d)) as typeof d;
+  staleDoc.root[0].children[0].text = '正文已经被人改写过，与快照不一致。';
+  const staleR = replaceTermHits(staleDoc, chosen);
+  check('区间已变化：整批拒绝（stale>0，replaced=0）', staleR.stale > 0 && staleR.replaced === 0, `${staleR.replaced}/${staleR.stale}`);
+  check('整批拒绝时正文完全不动', staleDoc.root[0].children[0].text === '正文已经被人改写过，与快照不一致。');
+
+  // 节点删除 → 失效
+  check('节点删除判定为失效', !isHitCurrent(undefined, chosen[0]));
+}
+
+// ---- 规范用语：AppStore 扫描快照、批量替换原子性、撤销/重做与持久化 ----
+{
+  const d = parseDocument(`商店法
+
+第一条
+按照规定办理。
+
+第二条
+再次按照办理。`).doc;
+  renumberAll(d.root);
+  const rules = sanitizeTermRules([{ id: 'k1', canonical: '依照', variants: ['按照'] }]);
+  const store = new AppStore({ doc: d, confirmed: {}, annotations: [], termRules: rules });
+  const snap0 = store.getSnapshot();
+  check('Store 实时给出命中', snap0.termHits.length === 2, String(snap0.termHits.length));
+
+  // 仅勾选第一条的命中：替换只处理已选命中，另一处保留
+  const firstHit = snap0.termHits.find((h) => h.nodeId === d.root[0].children[0].id)!;
+  const res = store.replaceSelectedTerms([firstHit.key]);
+  check('Store 替换返回成功', res.replaced === 1 && res.stale === 0, JSON.stringify(res));
+  const snap1 = store.getSnapshot();
+  check('已选命中被替换', snap1.doc.root[0].children[0].text === '依照规定办理。');
+  check('未选命中保留且重新扫描仍可见', snap1.doc.root[1].children[0].text === '再次按照办理。' && snap1.termHits.length === 1);
+  check('替换是一步：撤销恢复原文', (store.undo(), store.getSnapshot().doc.root[0].children[0].text === '按照规定办理。'));
+  check('撤销后命中恢复为 2 处', store.getSnapshot().termHits.length === 2);
+  check('重做再次替换', (store.redo(), store.getSnapshot().doc.root[0].children[0].text === '依照规定办理。'));
+
+  // 过期快照：撤销回旧正文拿到扫描命中后，删除其中一个命中节点，再用旧快照尝试替换 → 整批拒绝
+  store.undo();
+  const nowStale = store.getSnapshot().termHits; // 旧正文「按照」两处
+  const secondNodeId = d.root[1].children[0].id;
+  store.deleteNode(secondNodeId); // 结构性分歧：旧快照中第二条的命中已无对应节点
+  const rejected = store.replaceSelectedTerms(nowStale.map((h) => h.key));
+  check('Store 检测过期快照并整批拒绝', rejected.replaced === 0 && rejected.stale >= 1, JSON.stringify(rejected));
+  check('拒绝后第一条正文未被改动', store.getSnapshot().doc.root[0].children[0].text === '按照规定办理。');
+  check('规则随状态持久化（currentPersisted 含 termRules）', JSON.stringify(store.getSnapshot().termRules).includes('依照'));
+
+  // 规则增删改进入撤销历史
+  const beforeRules = store.getSnapshot().termRules.length;
+  const newId = store.addTermRule();
+  check('新增规则', store.getSnapshot().termRules.length === beforeRules + 1);
+  store.updateTermRule(newId, { canonical: '可以', variants: ['可'] });
+  store.undo();
+  // updateTermRule 与 addTermRule 之间因合并窗口（测试中同步执行，窗口内）可能合并为一步
+  const afterUndo = store.getSnapshot().termRules;
+  check('规则编辑可撤销', afterUndo.length === beforeRules || !afterUndo.some((r) => r.canonical === '可以'), JSON.stringify(afterUndo.map(r => r.canonical)));
+
+  // 导出 JSON 带规则；旧导入缺字段按空规则加载且不报错
+  const exported = store.exportJson();
+  check('导出包含 termRules', Array.isArray(exported.termRules) && exported.termRules!.length >= 1);
+  const store2 = new AppStore({ doc: d, confirmed: {}, annotations: [] });
+  check('旧数据缺 termRules 按空规则加载（0 命中）', store2.getSnapshot().termHits.length === 0 && store2.getSnapshot().termRules.length === 0);
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

@@ -3,8 +3,9 @@ import type {
   Annotation,
   ClauseNode,
   RefOccurrence,
+  TermHit,
 } from '../../shared/model';
-import { useApp, ANN_FOCUS_EVENT } from '../lib/context';
+import { useApp, ANN_FOCUS_EVENT, TERM_FOCUS_EVENT } from '../lib/context';
 import { useHighlighter } from '../lib/highlighter';
 import { RefInline } from './RefInline';
 
@@ -75,6 +76,7 @@ export function NodeEditor({
   }, [node.text, editing]);
 
   const annotations = store.getSnapshot().annotations.filter((a) => a.nodeId === node.id);
+  const termHits = store.getSnapshot().termHits.filter((h) => h.nodeId === node.id);
 
   // 问题跳转 / 批注跳转：滚动到节点
   useEffect(() => {
@@ -122,6 +124,8 @@ export function NodeEditor({
     hl.focusAnnotation && hl.focusAnnotation.nodeId === node.id
       ? hl.focusAnnotation
       : null;
+  const focusTerm =
+    hl.focusTerm && hl.focusTerm.nodeId === node.id ? hl.focusTerm : null;
 
   return (
     <div
@@ -175,6 +179,19 @@ export function NodeEditor({
               }
               return;
             }
+            const termEl = (e.target as HTMLElement).closest('.term-mark') as HTMLElement | null;
+            if (termEl) {
+              const key = termEl.dataset.termKey;
+              const hit = termHits.find((h) => h.key === key);
+              if (hit) {
+                highlighter.jumpToTerm(hit.key, hit.nodeId, {
+                  start: hit.start,
+                  end: hit.end,
+                });
+                window.dispatchEvent(new CustomEvent(TERM_FOCUS_EVENT, { detail: hit.key }));
+              }
+              return;
+            }
             if ((e.target as HTMLElement).closest('.ref-chip')) return;
             setEditing(true);
           }}
@@ -184,8 +201,10 @@ export function NodeEditor({
             text={node.text}
             occurrences={occurrences}
             annotations={annotations}
+            termHits={termHits}
             sentence={sentence}
             focusAnnotationId={focusAnn?.annotationId ?? null}
+            focusTermKey={focusTerm?.termKey ?? null}
           />
         </div>
       )}
@@ -294,14 +313,18 @@ function HighlightedText({
   text,
   occurrences,
   annotations,
+  termHits,
   sentence,
   focusAnnotationId,
+  focusTermKey,
 }: {
   text: string;
   occurrences: RefOccurrence[];
   annotations: Annotation[];
+  termHits: TermHit[];
   sentence: { start: number; end: number } | null;
   focusAnnotationId: string | null;
+  focusTermKey: string | null;
 }) {
   const sorted = useMemo(
     () => [...occurrences].sort((a, b) => a.span.start - b.span.start),
@@ -314,7 +337,16 @@ function HighlightedText({
     [annotations, text.length],
   );
 
-  // 引用边界 + 批注边界 + 源句边界切分全文，每个文本段带上其覆盖标记
+  // 规范用语命中经扫描侧重叠消解，两两互不交叠；仅渲染仍落在正文区间内者
+  const renderableTerms = useMemo(
+    () =>
+      [...termHits]
+        .filter((h) => h.start >= 0 && h.end <= text.length && h.end > h.start)
+        .sort((a, b) => a.start - b.start),
+    [termHits, text.length],
+  );
+
+  // 引用边界 + 批注边界 + 规范命中边界 + 源句边界切分全文，每个文本段带上其覆盖标记
   const points = useMemo(() => {
     const set = new Set<number>([0, text.length]);
     for (const o of sorted) {
@@ -325,17 +357,23 @@ function HighlightedText({
       set.add(a.start);
       set.add(a.end);
     }
+    for (const h of renderableTerms) {
+      set.add(h.start);
+      set.add(h.end);
+    }
     if (sentence) {
       set.add(sentence.start);
       set.add(sentence.end);
     }
     return [...set].filter((p) => p >= 0 && p <= text.length).sort((x, y) => x - y);
-  }, [sorted, renderable, sentence, text.length]);
+  }, [sorted, renderable, renderableTerms, sentence, text.length]);
 
   if (!text) return <span className="placeholder-text">（空，点击添加正文）</span>;
 
   const refAt = (p: number) =>
     sorted.find((o) => o.span.start <= p && o.span.end > p) ?? null;
+  const termAt = (p: number) =>
+    renderableTerms.find((h) => h.start <= p && h.end > p) ?? null;
 
   const elements: React.ReactNode[] = [];
   const renderedRefs = new Set<string>();
@@ -344,6 +382,7 @@ function HighlightedText({
     const end = points[i + 1];
     if (end <= start) continue;
     const covered = covering(renderable, start, end);
+    const term = termAt(start);
     const inSentence = sentence ? start >= sentence.start && end <= sentence.end : false;
     const active = covered.some((a) => a.id === focusAnnotationId);
     const key = `r${i}`;
@@ -363,26 +402,39 @@ function HighlightedText({
       }
       continue;
     }
-    if (covered.length > 0) {
-      elements.push(
+    // 纯文本段：自内向外包裹 规范命中标记 → 批注标记 → 源句高亮
+    let node: React.ReactNode = text.slice(start, end);
+    if (term) {
+      node = (
         <mark
           key={key}
+          className={`term-mark ${term.key === focusTermKey ? 'term-active' : ''}`}
+          data-term-key={term.key}
+          title={`禁用变体「${term.variant}」→ 规范词「${term.canonical}」（见右侧规范用语审校）`}
+        >
+          {node}
+        </mark>
+      );
+    }
+    if (covered.length > 0) {
+      node = (
+        <mark
+          key={`${key}-ann`}
           className={`ann-mark ann-${covered[0].status} ${active ? 'ann-active' : ''}`}
           data-ann-id={covered[0].id}
           title={`批注：${covered[0].content}`}
         >
-          {text.slice(start, end)}
-        </mark>,
+          {node}
+        </mark>
       );
-    } else if (inSentence) {
-      elements.push(
-        <mark key={key} className="sentence-mark">
-          {text.slice(start, end)}
-        </mark>,
+    } else if (!term && inSentence) {
+      node = (
+        <mark key={`${key}-sen`} className="sentence-mark">
+          {node}
+        </mark>
       );
-    } else {
-      elements.push(<span key={key}>{text.slice(start, end)}</span>);
     }
+    elements.push(node);
   }
   return <>{elements}</>;
 }

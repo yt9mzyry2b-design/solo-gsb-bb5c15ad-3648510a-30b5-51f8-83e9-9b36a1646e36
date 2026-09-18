@@ -180,7 +180,41 @@ export interface Annotation {
   updatedAt: number;
 }
 
-/** 命名版本快照：保存时刻的文档、歧义确认与批注（只读，不随后续编辑变化） */
+/**
+ * 规范用语规则：canonical 为规范词，variants 为该规则下的全部禁用变体。
+ * 变体命中后可批量替换为 canonical；同一文档内按规则数组顺序参与重叠消解。
+ */
+export interface TermRule {
+  id: string;
+  /** 规范词（替换目标） */
+  canonical: string;
+  /** 禁用变体（匹配原文） */
+  variants: string[];
+  /** 规则顺序（数组下标即优先级，仅用于展示） */
+  createdAt: number;
+}
+
+/**
+ * 规范用语扫描命中：一次禁用变体在某节点正文中的出现。
+ * start/end 对应当前快照正文偏移；相邻命中经重叠消解后互不交叠。
+ */
+export interface TermHit {
+  /** nodeId:start:end:ruleId 构成的稳定 id */
+  key: string;
+  ruleId: string;
+  /** 规则顺序下标（同一位置被多个规则命中时，顺序靠前的优先） */
+  ruleIndex: number;
+  canonical: string;
+  /** 命中的禁用变体原文 */
+  variant: string;
+  nodeId: string;
+  start: number;
+  end: number;
+  /** 扫描快照时刻该节点的完整正文（替换提交前据此核对节点原文是否已变化） */
+  nodeText: string;
+}
+
+/** 命名版本快照：保存时刻的文档、歧义确认、批注与规范用语规则（只读，不随后续编辑变化） */
 export interface DocSnapshot {
   id: string;
   name: string;
@@ -190,6 +224,8 @@ export interface DocSnapshot {
   confirmed: Record<string, string>;
   /** 保存时刻的审阅批注；旧数据缺少该字段时按空列表加载 */
   annotations?: Annotation[];
+  /** 保存时刻的规范用语规则；旧数据缺少该字段时按空列表加载 */
+  termRules?: TermRule[];
 }
 
 /** 持久化状态（同时用于本地文件与浏览器缓存） */
@@ -201,6 +237,8 @@ export interface PersistedState {
   snapshots?: DocSnapshot[];
   /** 审阅批注；旧数据缺少该字段时按空列表加载 */
   annotations?: Annotation[];
+  /** 规范用语规则；旧数据缺少该字段时按空规则加载 */
+  termRules?: TermRule[];
 }
 
 export interface ExportBundle {
@@ -212,5 +250,7 @@ export interface ExportBundle {
   snapshots?: DocSnapshot[];
   /** 审阅批注随 JSON 一并导出，导入时恢复并尝试重定位 */
   annotations?: Annotation[];
+  /** 规范用语规则随 JSON 一并导出；旧文件缺少该字段时按空规则加载 */
+  termRules?: TermRule[];
   exportedAt: string;
 }
